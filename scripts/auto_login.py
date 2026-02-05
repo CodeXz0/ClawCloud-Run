@@ -11,6 +11,7 @@ import os
 import random
 import re
 import sys
+import pyotp
 import time
 from urllib.parse import urlparse
 
@@ -23,7 +24,7 @@ from playwright.sync_api import sync_playwright
 PROXY_DSN = os.environ.get("PROXY_DSN", "").strip()
 
 # 固定登录入口，OAuth后会自动跳转到实际区域
-LOGIN_ENTRY_URL = "https://console.run.claw.cloud/login"
+LOGIN_ENTRY_URL = "https://us-west-1.run.claw.cloud/login"
 SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30  # Mobile验证 默认等 30 秒
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  # 2FA验证 默认等 120 秒
@@ -179,7 +180,8 @@ class AutoLogin:
     def __init__(self):
         self.username = os.environ.get('GH_USERNAME')
         self.password = os.environ.get('GH_PASSWORD')
-        self.gh_session = os.environ.get('GH_SESSION', '').strip()
+        self.totp = os.environ.get('GH_TOTP')
+        self.gh_session = ""
         self.tg = Telegram()
         self.secret = SecretUpdater()
         self.shots = []
@@ -187,8 +189,8 @@ class AutoLogin:
         self.n = 0
         
         # 区域相关
-        self.detected_region = 'eu-central-1'  # 检测到的区域，如 "ap-southeast-1"
-        self.region_base_url = 'https://eu-central-1.run.claw.cloud'  # 检测到的区域基础 URL
+        self.detected_region = 'us-west-1'  # 检测到的区域，如 "ap-southeast-1"
+        self.region_base_url = 'https://us-west-1.run.claw.cloud'  # 检测到的区域基础 URL
         
     def log(self, msg, level="INFO"):
         icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARN": "⚠️", "STEP": "🔹"}
@@ -387,8 +389,8 @@ class AutoLogin:
     
     def handle_2fa_code_input(self, page):
         """处理 TOTP 验证码输入（通过 Telegram 发送 /code 123456）"""
-        self.log("需要输入验证码", "WARN")
-        shot = self.shot(page, "两步验证_code")
+        self.log("需要输入TOTP验证码", "WARN")
+        #shot = self.shot(page, "两步验证_code")
 
         # 如果是 Security Key (webauthn) 页面，尝试切换到 Authenticator App
         if 'two-factor/webauthn' in page.url:
@@ -437,27 +439,29 @@ class AutoLogin:
         except:
             pass
 
-        # 发送提示并等待验证码
+        '''# 发送提示并等待验证码
         self.tg.send(f"""🔐 <b>需要验证码登录</b>
 
-用户{self.username}正在登录，请在 Telegram 里发送：
-<code>/code 你的6位验证码</code>
+            用户{self.username}正在登录，请在 Telegram 里发送：
+            <code>/code 你的6位验证码</code>
 
-等待时间：{TWO_FACTOR_WAIT} 秒""")
+            等待时间：{TWO_FACTOR_WAIT} 秒""")
         if shot:
-            self.tg.photo(shot, "两步验证页面")
+            self.tg.photo(shot, "两步验证页面")'''
 
-        self.log(f"等待验证码（{TWO_FACTOR_WAIT}秒）...", "WARN")
-        code = self.tg.wait_code(timeout=TWO_FACTOR_WAIT)
+        #self.log(f"等待验证码（{TWO_FACTOR_WAIT}秒）...", "WARN")
+        #code = self.tg.wait_code(timeout=TWO_FACTOR_WAIT)
+        code = pyotp.TOTP(self.totp).now()
+        self.log(f"2FA Code: {code}" , "INFO")
 
-        if not code:
+        """if not code:
             self.log("等待验证码超时", "ERROR")
             self.tg.send("❌ <b>等待验证码超时</b>")
-            return False
+            return False"""
 
         # 不打印验证码明文，只提示收到
-        self.log("收到验证码，正在填入...", "SUCCESS")
-        self.tg.send("✅ 收到验证码，正在填入...")
+        self.log("✅正在填入验证码...", "SUCCESS")
+        #self.tg.send("✅ 收到验证码，正在填入...")
 
         # 常见 OTP 输入框 selector（优先级排序）
         selectors = [
@@ -501,6 +505,10 @@ class AutoLogin:
                         time.sleep(random.uniform(0.3, 0.8))
                         page.keyboard.press("Enter")
                         self.log("已按 Enter 提交", "SUCCESS")
+                        
+                    if 'github.com/login/oauth/authorize' in page.url:
+                        self.log("点击授权中...(不妙,疑似太频繁才会出现)", "SUCCESS")
+                        self.oauth(page)
 
                     time.sleep(3)
                     page.wait_for_load_state('networkidle', timeout=30000)
@@ -508,8 +516,8 @@ class AutoLogin:
 
                     # 检查是否通过
                     if "github.com/sessions/two-factor/" not in page.url:
-                        self.log("验证码验证通过！", "SUCCESS")
-                        self.tg.send("✅ <b>验证码验证通过</b>")
+                        self.log("✅验证码验证通过！", "SUCCESS")
+                        #self.tg.send("✅ <b>验证码验证通过</b>")
                         return True
                     else:
                         self.log("验证码可能错误", "ERROR")
@@ -626,7 +634,7 @@ class AutoLogin:
                 self.log("重定向成功！", "SUCCESS")
                 
                 # 检测并记录区域
-                self.detect_region(url)
+                #self.detect_region(url)
                 
                 return True
             
@@ -663,10 +671,10 @@ class AutoLogin:
                 page.wait_for_load_state('networkidle', timeout=15000)
                 self.log(f"已访问: {name} ({url})", "SUCCESS")
                 
-                # 再次检测区域（以防中途跳转）
+                """ # 再次检测区域（以防中途跳转）
                 current_url = page.url
                 if 'claw.cloud' in current_url:
-                    self.detect_region(current_url)
+                    self.detect_region(current_url) """
                 
                 time.sleep(2)
             except Exception as e:
@@ -747,6 +755,7 @@ class AutoLogin:
                     self.log(f"代理配置解析失败: {e}", "ERROR")
 
             browser = p.chromium.launch(**launch_args)
+            
             context = browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
@@ -824,12 +833,13 @@ class AutoLogin:
                 if 'signin' not in url.lower() and 'claw.cloud' in url and  'github.com' not in url:
                     self.log("已登录！", "SUCCESS")
                     # 检测区域
-                    self.detect_region(url)
+                    #self.detect_region(url)
                     self.keepalive(page)
                     # 提取并保存新 Cookie
                     new = self.get_session(context)
                     if new:
                         self.save_cookie(new)
+                        print(f"新 Cookie: {new}")
                     self.notify(True)
                     print("\n✅ 成功！\n")
                     return
@@ -875,6 +885,7 @@ class AutoLogin:
                 self.log("步骤6: 更新 Cookie", "STEP")
                 new = self.get_session(context)
                 if new:
+                    print(f"新 Cookie: {new}")
                     self.save_cookie(new)
                 else:
                     self.log("未获取到新 Cookie", "WARN")
